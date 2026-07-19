@@ -292,6 +292,57 @@ if __name__ == "__main__":
     # Combine train + validation predictions
     full_predictions = pd.concat([all_predictions, predictions], ignore_index=True)
 
+# ═══════════════════════════════════════════
+    #  EVALUATION METRICS (for Page 1)
+    # ═══════════════════════════════════════════
+    from sklearn.metrics import (precision_score, recall_score, f1_score,
+                                  accuracy_score, roc_auc_score, confusion_matrix)
+
+    val_y_true = (val_labeled["class_label"].values >= 1).astype(int)
+
+    metrics_dict = {
+        "accuracy": accuracy_score(val_y_true, val_pred),
+        "precision": precision_score(val_y_true, val_pred, zero_division=0),
+        "recall": recall_score(val_y_true, val_pred, zero_division=0),
+        "f1": f1_score(val_y_true, val_pred, zero_division=0),
+        "auc": roc_auc_score(val_y_true, val_proba),
+        "n_validation": len(val_y_true),
+        "n_true_failures": int(val_y_true.sum()),
+        "n_flagged": int(val_pred.sum()),
+        "n_true_positive": int(((val_pred == 1) & (val_y_true == 1)).sum()),
+        "n_false_positive": int(((val_pred == 1) & (val_y_true == 0)).sum()),
+        "n_false_negative": int(((val_pred == 0) & (val_y_true == 1)).sum()),
+        "n_true_negative": int(((val_pred == 0) & (val_y_true == 0)).sum()),
+        "decision_threshold": thresh,
+        "conformal_band_width": q,
+    }
+
+    metrics_dict["total_cost"] = (
+        metrics_dict["n_false_positive"] * COST_FP +
+        metrics_dict["n_false_negative"] * COST_MISS
+    )
+    metrics_dict["cost_per_vehicle"] = metrics_dict["total_cost"] / metrics_dict["n_validation"]
+
+    metrics_df = pd.DataFrame([metrics_dict])
+
+    cm = confusion_matrix(val_labeled["class_label"].values,
+                          np.where(val_pred == 1, 1, 0), labels=[0,1,2,3,4])
+    cm_df = pd.DataFrame(cm, columns=[f"pred_{i}" for i in range(5)])
+    cm_df["actual_class"] = list(range(5))
+
+    class_midpoints = {0: 100, 1: 36, 2: 18, 3: 9, 4: 3}
+    retro_df = pd.DataFrame({
+        "vehicle_id": val_labeled["vehicle_id"].values,
+        "actual_class": val_labeled["class_label"].values,
+        "predicted_rul": val_rul,
+        "approx_actual_rul": val_labeled["class_label"].map(class_midpoints).values,
+        "risk_score": np.round(val_proba, 4),
+    })
+
+    print(f"\nValidation metrics: acc={metrics_dict['accuracy']:.3f}, "
+          f"precision={metrics_dict['precision']:.3f}, recall={metrics_dict['recall']:.3f}, "
+          f"AUC={metrics_dict['auc']:.3f}, total_cost=${metrics_dict['total_cost']}")
+
     # ─── Write to DuckDB ───
     con = duckdb.connect(DB_PATH)
     con.execute("CREATE OR REPLACE TABLE predictions AS SELECT * FROM full_predictions")
@@ -299,6 +350,9 @@ if __name__ == "__main__":
         CREATE OR REPLACE TABLE feature_importances AS
         SELECT * FROM read_csv_auto('models/feature_importances.csv')
     """)
+    con.execute("CREATE OR REPLACE TABLE metrics AS SELECT * FROM metrics_df")
+    con.execute("CREATE OR REPLACE TABLE confusion_matrix AS SELECT * FROM cm_df")
+    con.execute("CREATE OR REPLACE TABLE retrospective AS SELECT * FROM retro_df")
     con.close()
 
     print(f"\n{'=' * 50}")
